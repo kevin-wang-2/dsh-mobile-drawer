@@ -1,23 +1,12 @@
 /**
- * 手机输入按键：窄屏下在右上角浮一排手机键盘上没有的键，目前是 Shift、Ctrl 与 Tab。
- *
- * 输入框里打 / 或 @ 会弹出触发菜单，那时 Tab 的职责是选中补全项而不是插字符。
- * 但点击屏幕上的按钮会先把菜单关掉，所以必须抢在关闭之前处理：
- * 触发菜单的关闭监听挂在 document 上，插件就在 document 的 pointerdown 捕获阶段接手，
- * 那一刻菜单还开着、编辑器还带焦点，派发一次合成的 Tab 就能被菜单接管。
- * 菜单没接手时才在光标处插入制表符。
- *
- * Shift 与 Ctrl 是粘滞修饰键：点一下锁定，接着按的普通键带上它，随后自动放开；
- * 再点自己一下则当场取消。手机没法两只手按组合键，粘滞是这里唯一能用的形态。
- * 软键盘上真实按下的回车也归它们管：拦下来按锁定状态补发一个带 Shift 或 Ctrl 的回车，
- * Shift 加回车让输入框换行，Ctrl 加回车交给 DSH 的排队发送。
- *
- * 键位表是唯一的扩展点，加键只往 KEYS 加一项，容器与键面样式都不用动。
- *
- * @module dsh-mobile-drawer/client/keys
+ * 手机辅助键：默认收起，展开后提供 Ctrl 与 Tab。
+ * Ctrl 用于下一次辅助 Tab 或聊天回车；收起时取消锁定。
+ * Tab 优先交给补全菜单、终端和编辑器，普通输入面在光标处插入制表符。
+ * 按键在 pointerdown 捕获阶段处理，保留编辑焦点和候选菜单。
+ * 按键能力改编自 better-er/dsh-mobile-drawer (MIT)，见 LICENSE。
  */
 
-import { useEffect, type ReactNode } from 'react'
+import { createElement, useEffect, type ReactNode } from 'react'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 
@@ -28,63 +17,77 @@ const MOUNT_SLOT = '__dshMobileDrawerKeysAbort'
 const PACKAGE_NAME = 'dsh-mobile-drawer'
 
 /** 键位组容器类名，样式一次注入。 */
-const ROW_CLASS = 'dsh-mobile-drawer-keys'
+const ROW_CLASS = 'dsh-mobile-keys'
 
-/**
- * 键位条的样式。
- *
- * 条子浮在右上角，横向排开；键面样式统一由子选择器给，加键不必新增 CSS。
- * 顶部工具行约占 28 像素，文件预览页在它下面还有一排操作按钮，实测压到 56 像素仍会盖住
- * 「用古法编程编辑」，所以从这里再往下让到 96 像素。
- * 只在窄屏显示：宽屏本来就有物理键盘，不占位置。
- */
-const STYLE = [
-  '.dsh-mobile-drawer-keys {',
-  '  position: fixed;',
-  '  top: calc(env(safe-area-inset-top, 0px) + 96px);',
-  '  right: calc(env(safe-area-inset-right, 0px) + 10px);',
-  '  z-index: 1000;',
-  '  display: flex;',
-  '  align-items: center;',
-  '  gap: 7px;',
-  '}',
-  '.dsh-mobile-drawer-keys > button {',
-  '  display: inline-flex;',
-  '  align-items: center;',
-  '  justify-content: center;',
-  '  min-width: 34px;',
-  '  height: 34px;',
-  '  padding: 0 10px;',
-  '  border: 0.5px solid var(--dsw-alias-border-l3);',
-  '  border-radius: var(--dsw-radius-sm, 8px);',
-  '  background: var(--dsw-alias-button-elevated-fill);',
-  '  color: var(--dsw-alias-label-primary);',
-  '  box-shadow: var(--dsw-elevation-panel);',
-  '  font: inherit;',
-  '  font-size: 14px;',
-  '  line-height: 1;',
-  '  cursor: pointer;',
-  '  -webkit-tap-highlight-color: transparent;',
-  '}',
-  '.dsh-mobile-drawer-keys > button:active,',
-  '.dsh-mobile-drawer-keys > button.is-active {',
-  '  background: var(--dsw-alias-interactive-bg-hover);',
-  '  border-color: var(--dsw-alias-label-primary);',
-  '}',
-  '.dsh-mobile-drawer-keys > button:focus-visible {',
-  '  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));',
-  '  outline-offset: 2px;',
-  '}',
-  '@media (min-width: 1024px) {',
-  '  .dsh-mobile-drawer-keys {',
-  '    display: none;',
-  '  }',
-  '}',
-  '',
-].join('\n')
+/** 入口位于当前输入面的工具栏，展开面板向上弹出，不挤占发送按钮。 */
+const STYLE = `
+.dsh-mobile-keys {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.dsh-mobile-keys-seat { display: inline-flex; flex: none; }
+.dsh-mobile-keys[data-context] { align-self: flex-end; margin: 4px 8px; }
+.monaco-editor > .dsh-mobile-keys { position: absolute; bottom: 0; right: 0; }
+.dsh-mobile-keys-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  border: .5px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-md, 12px);
+  background: var(--dsw-alias-button-elevated-fill);
+  box-shadow: var(--dsw-elevation-panel);
+}
+.dsh-mobile-keys-panel[hidden] { display: none; }
+.dsh-mobile-keys button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  height: 36px;
+  padding: 0 10px;
+  border: .5px solid var(--dsw-alias-border-l3);
+  border-radius: var(--dsw-radius-sm, 8px);
+  background: var(--dsw-alias-button-elevated-fill);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: var(--dsw-elevation-panel);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+.dsh-mobile-keys button[data-keys-toggle] {
+  height: 32px;
+  padding: 0 6px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+.dsh-mobile-keys button:active,
+.dsh-mobile-keys button.is-active,
+.dsh-mobile-keys button[aria-expanded="true"] {
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-color: var(--dsw-alias-label-primary);
+}
+.dsh-mobile-keys button:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+@media (min-width: 1024px) { .dsh-mobile-keys { display: none; } }
+`
 
 /** 粘滞修饰键的种类。 */
-type Modifier = 'shift' | 'ctrl'
+type Modifier = 'ctrl'
 
 /**
  * 一个键位。
@@ -98,7 +101,6 @@ type KeySpec = { readonly id: string; readonly label: string } & (
 
 /** 键位表，也是唯一的扩展点。加键只在这里加一项，修饰键排在普通键前面。 */
 const KEYS: readonly KeySpec[] = [
-  { id: 'shift', label: 'Shift', modifier: 'shift' },
   { id: 'ctrl', label: 'Ctrl', modifier: 'ctrl' },
   { id: 'tab', label: 'Tab', text: '\t', yieldToMenu: true },
 ]
@@ -110,19 +112,19 @@ const activeModifiers = new Set<Modifier>()
 let keyRow: Element | undefined
 
 /** 输入区按键条的 props，session 作用域下带标准输入操作面。 */
-type InputDockProps = PropsRuntime<'conversation.input.dock'>
+type InputControlProps = PropsRuntime<'conversation.input.right'>
 
 /** 当前会话的输入操作面，由 slot 组件挂载后持续更新。 */
-let activeActions: InputDockProps['inputActions'] | undefined
+let activeActions: InputControlProps['inputActions'] | undefined
 
 /** 客户端上下文里本模块用得到的一小片。 */
 export interface KeysContext {
   effect(callback: () => (() => void) | void, label?: string): void
   slots: {
-    inject(key: 'conversation.input.dock', callback: () => (() => void) | void): void
+    inject(key: 'conversation.input.right', callback: () => (() => void) | void): void
     register(
-      spec: { name: 'conversation.input.dock'; id: string; order?: number },
-      component: (props: InputDockProps) => ReactNode,
+      spec: { name: 'conversation.input.right'; id: string; order?: number },
+      component: (props: InputControlProps) => ReactNode,
     ): () => void
   }
 }
@@ -145,7 +147,6 @@ const ENTER_EVENT = keyEventOptions('Enter', 'Enter', 13)
 /** 一次派发要带上的修饰键状态。 */
 interface ModifierState {
   readonly ctrlKey: boolean
-  readonly shiftKey: boolean
 }
 
 /**
@@ -183,7 +184,7 @@ function syncModifierState(): void {
  * 修饰键只切换锁定状态，不落字；普通键取上当前锁定状态再派发，派发完就把锁定放开，
  * 免得下一次按键莫名带上修饰符。
  */
-function press(key: KeySpec): void {
+function press(key: KeySpec, target: Element | null = document.activeElement): void {
   if (key.modifier !== undefined) {
     if (activeModifiers.has(key.modifier)) {
       activeModifiers.delete(key.modifier)
@@ -196,11 +197,10 @@ function press(key: KeySpec): void {
 
   const modifiers: ModifierState = {
     ctrlKey: activeModifiers.has('ctrl'),
-    shiftKey: activeModifiers.has('shift'),
   }
   activeModifiers.clear()
   syncModifierState()
-  insert(key, modifiers)
+  insert(key, modifiers, target)
 }
 
 /**
@@ -211,16 +211,14 @@ function press(key: KeySpec): void {
  * 终端、编辑器与普通输入框各有自己的键盘处理，把合成的 Tab 原样交给它们即可；
  * 合成的按键不触发浏览器默认行为，所以普通输入框那一支自己把字符补上。
  */
-function insert(key: KeySpec, modifiers: ModifierState): void {
+function insert(key: KeySpec, modifiers: ModifierState, active: Element | null): void {
   const text = key.text
   if (text === undefined) {
     console.warn('[dsh-mobile-drawer] 键位既不是修饰键也没有字符，按键未生效：' + key.id)
     return
   }
 
-  const active = document.activeElement
-
-  if (active instanceof HTMLElement && active.isContentEditable) {
+  if (active instanceof HTMLElement && active.isContentEditable && active.matches('[data-composer-input]')) {
     if (key.yieldToMenu === true && !dispatchTab(active, modifiers)) {
       return
     }
@@ -259,23 +257,29 @@ function insert(key: KeySpec, modifiers: ModifierState): void {
   console.warn('[dsh-mobile-drawer] 当前没有能接收按键的元素，按键未生效：' + key.id)
 }
 
-/**
- * 只做一件事的空组件：把会话作用域的输入操作面留下来给按键条用。
- *
- * 按键条本身不渲染在这里。它固定在右上角，终端与文件编辑器这些不在会话输入区的页面也该看得见，
- * 所以由 applyKeys 直接建 DOM，这个登记点只负责拿到 inputActions。
- */
-function ActionsBridge({ inputActions }: InputDockProps) {
+/** composer 的原生工具栏座位；同一套按键随当前输入面移动。 */
+let composerSeat: HTMLElement | null = null
+let attachKeys: ((seat: HTMLElement | null) => void) | undefined
+
+function bindComposerSeat(node: HTMLSpanElement | null): void {
+  const previous = composerSeat
+  composerSeat = node
+  if (node) {
+    const active = document.activeElement
+    if (!(active instanceof Element) || !active.closest('[data-sidebar-terminal], .cm-editor, .monaco-editor')) attachKeys?.(node)
+  } else if (previous?.contains(keyRow ?? null)) {
+    attachKeys?.(null)
+  }
+}
+
+function ActionsBridge({ inputActions }: InputControlProps) {
   useEffect(() => {
     activeActions = inputActions
     return () => {
-      if (activeActions === inputActions) {
-        activeActions = undefined
-      }
+      if (activeActions === inputActions) activeActions = undefined
     }
   }, [inputActions])
-
-  return null
+  return createElement('span', { className: 'dsh-mobile-keys-seat', ref: bindComposerSeat })
 }
 
 /**
@@ -290,14 +294,18 @@ export function applyKeys(ctx: KeysContext): void {
   host[MOUNT_SLOT]?.abort()
   const controller = new AbortController()
   host[MOUNT_SLOT] = controller
+  ctx.effect(() => () => {
+    controller.abort()
+    if (host[MOUNT_SLOT] === controller) delete host[MOUNT_SLOT]
+  }, 'dsh-mobile-drawer：释放输入监听')
   for (const stale of document.querySelectorAll('.' + ROW_CLASS)) {
     stale.remove()
   }
-  document.getElementById('dsh-mobile-drawer-keys-style')?.remove()
+  document.getElementById('dsh-mobile-keys-style')?.remove()
 
   ctx.effect(() => {
     const style = document.createElement('style')
-    style.id = 'dsh-mobile-drawer-keys-style'
+    style.id = 'dsh-mobile-keys-style'
     // 与 index.ts 同理：不带 data-plugin 的样式会被任何插件实例化时认领走，随后被删。
     style.dataset.plugin = PACKAGE_NAME
     style.dataset.pluginCss = PACKAGE_NAME + '/client-keys.css'
@@ -310,6 +318,7 @@ export function applyKeys(ctx: KeysContext): void {
 
   ctx.effect(() => {
     const onPointerDown = (event: PointerEvent): void => {
+      if (!event.isPrimary || event.button !== 0) return
       const target = event.target
       if (!(target instanceof Element)) {
         return
@@ -317,6 +326,14 @@ export function applyKeys(ctx: KeysContext): void {
       // 先认准自家的容器，页面别处若有同样带 data-key 的按钮，不归这里管
       const row = target.closest('.' + ROW_CLASS)
       if (row === null) {
+        return
+      }
+      if (target.closest('button[data-keys-toggle]')) {
+        // 展开入口也不能夺走输入焦点，否则会收起软键盘。
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        const toggle = row.querySelector<HTMLButtonElement>('[data-keys-toggle]')
+        toggle?.click()
         return
       }
       const button = target.closest('button[data-key]')
@@ -337,47 +354,106 @@ export function applyKeys(ctx: KeysContext): void {
   }, 'dsh-mobile-drawer：手机按键')
 
   ctx.effect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      // 只管软键盘上真实按下、又没自带修饰键的回车：已发生的按键改不了，只能拦下来自己重发一个。
-      // 合成事件一律跳过，免得自己发的再被自己接住。
-      // 判定同时认 key 与 keyCode：安卓软键盘的回车常常给不出 Enter 这个 key，只给 keyCode 13
-      const isEnter = event.key === 'Enter' || event.code === 'Enter' || event.keyCode === 13
-      if (!event.isTrusted || !isEnter || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) {
-        return
-      }
-      const shift = activeModifiers.has('shift')
-      const ctrl = activeModifiers.has('ctrl')
-      if (!shift && !ctrl) {
-        return
-      }
-      // 只改对话输入框。终端里 Shift 加回车与回车等价，普通输入框却未必，不必替它们拿主意。
-      // 手机上回车的 target 未必就是编辑框本身，所以往上找最近的 contenteditable 祖先
-      const holder = event.target instanceof Element ? event.target.closest('[contenteditable]') : null
-      if (holder === null) {
-        return
-      }
-      // 编辑器的按键处理只认事件自带的修饰键，所以拦下这一下，补发一个带上 Shift 或 Ctrl 的回车
+    const media = matchMedia('(max-width: 1023.98px)')
+    let composing = false
+    let composingUntil = 0
+    let insertingLineBreak = false
+    const holderOf = (target: EventTarget | null): HTMLElement | null => {
+      const holder = target instanceof Element ? target.closest('[data-composer-input]') : null
+      return holder instanceof HTMLElement && holder.isContentEditable ? holder : null
+    }
+    const inComposition = (event: KeyboardEvent | InputEvent, holder: HTMLElement) =>
+      composing || performance.now() < composingUntil || event.isComposing ||
+      ('keyCode' in event && event.keyCode === 229) || holder.hasAttribute('data-composer-composing')
+    const newline = (event: Event, holder: HTMLElement) => {
       event.preventDefault()
       event.stopImmediatePropagation()
-      // 两个都锁着时按 Shift 算，换行没有副作用；用掉哪个放开哪个，另一个留着
-      const used: Modifier = shift ? 'shift' : 'ctrl'
-      activeModifiers.delete(used)
-      syncModifierState()
-      const init = { ...ENTER_EVENT, shiftKey: used === 'shift', ctrlKey: used === 'ctrl' }
-      // 手机上回车的落点常只是编辑器里的一个普通元素，补发要打到真正的编辑容器上，编辑器的按键处理才认
-      const sink = holder instanceof HTMLElement ? holder : event.target instanceof HTMLElement ? event.target : null
-      if (sink === null) {
+      // 走 Lexical 的标准编辑事件，生成 LineBreakNode 并移动光标。
+      // 异步文本插入接口插入裸换行时，Safari 可能把后续文字留在换行前。
+      insertingLineBreak = true
+      try {
+        holder.dispatchEvent(new InputEvent('beforeinput', {
+          inputType: 'insertLineBreak', bubbles: true, cancelable: true, composed: true,
+        }))
+      } finally { insertingLineBreak = false }
+    }
+    const onCompositionStart = (event: CompositionEvent) => {
+      if (holderOf(event.target)) composing = true
+    }
+    const onCompositionEnd = (event: CompositionEvent) => {
+      if (!holderOf(event.target)) return
+      composing = false
+      // Safari 的 compositionend 可能先于用来选词的 Enter。
+      composingUntil = performance.now() + 10
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      const holder = holderOf(event.target)
+      const isEnter = event.key === 'Enter' || event.code === 'Enter' || event.keyCode === 13
+      if (!media.matches || !holder || !isEnter || inComposition(event, holder)) return
+      // 外接键盘的提交与特殊组合键仍交给宿主；只改普通 Enter / Shift+Enter。
+      if (event.ctrlKey || event.metaKey || event.altKey) return
+      const shift = event.shiftKey
+      const ctrl = activeModifiers.has('ctrl')
+      // 补全菜单打开时，普通 Enter 仍用于选中候选项。
+      if (!shift && !ctrl && holder.closest('[data-composer-seat]')?.querySelector('[data-trigger-menu]')) return
+      if (!shift && ctrl) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        activeModifiers.delete('ctrl')
+        syncModifierState()
+        holder.dispatchEvent(new KeyboardEvent('keydown', { ...ENTER_EVENT, ctrlKey: true }))
+        holder.dispatchEvent(new KeyboardEvent('keyup', { ...ENTER_EVENT, ctrlKey: true }))
         return
       }
-      sink.dispatchEvent(new KeyboardEvent('keydown', init))
-      sink.dispatchEvent(new KeyboardEvent('keyup', init))
+      syncModifierState()
+      newline(event, holder)
     }
-    document.addEventListener('keydown', onKeyDown, { capture: true, signal: controller.signal })
-  }, 'dsh-mobile-drawer：粘滞修饰键的回车')
+    const onBeforeInput = (event: InputEvent) => {
+      const holder = holderOf(event.target)
+      if (insertingLineBreak || !media.matches || !holder || !event.cancelable || inComposition(event, holder)) return
+      // iOS 软键盘可能不发 keydown，直接发 insertParagraph。
+      if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') newline(event, holder)
+    }
+    const signal = controller.signal
+    document.addEventListener('compositionstart', onCompositionStart, { capture: true, signal })
+    document.addEventListener('compositionend', onCompositionEnd, { capture: true, signal })
+    document.addEventListener('keydown', onKeyDown, { capture: true, signal })
+    document.addEventListener('beforeinput', onBeforeInput, { capture: true, signal })
+    const hints = new Map<Element, string | null>()
+    const syncHints = () => {
+      for (const holder of document.querySelectorAll('[data-composer-input]')) {
+        if (!hints.has(holder)) hints.set(holder, holder.getAttribute('enterkeyhint'))
+        const value = media.matches ? 'enter' : hints.get(holder)
+        if (value === null) holder.removeAttribute('enterkeyhint')
+        else if (value !== undefined) holder.setAttribute('enterkeyhint', value)
+      }
+    }
+    const observer = new MutationObserver(syncHints)
+    observer.observe(document.body, { childList: true, subtree: true })
+    media.addEventListener('change', syncHints, { signal })
+    syncHints()
+    return () => {
+      observer.disconnect()
+      for (const [holder, value] of hints) {
+        if (value === null) holder.removeAttribute('enterkeyhint')
+        else holder.setAttribute('enterkeyhint', value)
+      }
+    }
+  }, 'dsh-mobile-drawer：手机 Enter 换行与输入法保护')
 
   ctx.effect(() => {
     const row = document.createElement('div')
     row.className = ROW_CLASS
+    const panel = document.createElement('div')
+    panel.id = 'dsh-mobile-keys-panel'
+    panel.className = 'dsh-mobile-keys-panel'
+    panel.hidden = true
+    panel.setAttribute('role', 'group')
+    panel.setAttribute('aria-label', '辅助按键')
+    let previousTarget: Element | null = null
+    row.addEventListener('focusin', event => {
+      if (event.relatedTarget instanceof Element && !row.contains(event.relatedTarget)) previousTarget = event.relatedTarget
+    }, { signal: controller.signal })
     for (const key of KEYS) {
       const button = document.createElement('button')
       button.type = 'button'
@@ -387,22 +463,91 @@ export function applyKeys(ctx: KeysContext): void {
         button.setAttribute('aria-pressed', 'false')
       }
       button.textContent = key.label
-      row.append(button)
+      button.addEventListener('click', event => {
+        if (event.detail !== 0) return
+        event.preventDefault()
+        // 键盘或辅助技术激活时，焦点在按键自身；仍把 Tab 送回之前的输入面。
+        press(key, previousTarget)
+      }, { signal: controller.signal })
+      panel.append(button)
     }
-    document.body.append(row)
+    const toggle = document.createElement('button')
+    toggle.type = 'button'
+    toggle.dataset.keysToggle = ''
+    toggle.textContent = '辅助键'
+    toggle.setAttribute('aria-controls', panel.id)
+    const setExpanded = (expanded: boolean) => {
+      panel.hidden = !expanded
+      toggle.setAttribute('aria-expanded', String(expanded))
+      toggle.setAttribute('aria-label', expanded ? '收起辅助键' : '展开辅助键')
+      toggle.title = expanded ? '收起辅助键' : '展开辅助键'
+      if (!expanded) {
+        activeModifiers.clear()
+        syncModifierState()
+      }
+    }
+    const signal = controller.signal
+    // 鼠标/触摸已由 pointerdown 处理；detail=0 对应键盘或辅助技术激活。
+    toggle.addEventListener('click', event => {
+      event.preventDefault()
+      if (event.detail === 0) setExpanded(panel.hidden)
+    }, { signal })
+    row.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && !panel.hidden) {
+        setExpanded(false)
+        toggle.focus({ preventScroll: true })
+      }
+    }, { signal })
+    const media = matchMedia('(max-width: 1023.98px)')
+    media.addEventListener('change', () => { if (!media.matches) setExpanded(false) }, { signal })
+    row.append(panel, toggle)
     keyRow = row
+    const moveTo = (seat: HTMLElement | null) => {
+      if (row.parentElement === seat) return
+      setExpanded(false)
+      row.remove()
+      if (!seat) return
+      const context = seat.matches('[data-sidebar-terminal]') ? 'terminal'
+        : seat.matches('.cm-editor, .monaco-editor') ? 'editor' : null
+      if (context) row.dataset.context = context
+      else delete row.dataset.context
+      seat.append(row)
+    }
+    attachKeys = moveTo
+    const placeForInput = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement) || row.contains(target)) return
+      if (target.closest('[data-composer-input]')) {
+        moveTo(composerSeat)
+        return
+      }
+      if (!target.matches('textarea, [contenteditable="true"], [role="textbox"]')) return
+      const surface = target.closest<HTMLElement>('[data-sidebar-terminal], .cm-editor, .monaco-editor')
+      if (surface) moveTo(surface)
+    }
+    const onFocus = (event: FocusEvent) => placeForInput(event.target)
+    document.addEventListener('focusin', onFocus, { capture: true, signal })
+    // 关闭终端/编辑器时，控件回到 composer；不留下脱离输入面的悬浮入口。
+    const observer = new MutationObserver(() => {
+      if (!row.isConnected && composerSeat?.isConnected) moveTo(composerSeat)
+    })
+    observer.observe(document.getElementById('root')!, { childList: true, subtree: true })
+    moveTo(composerSeat)
+    placeForInput(document.activeElement)
+    setExpanded(false)
     return () => {
+      observer.disconnect()
       row.remove()
       keyRow = undefined
+      if (attachKeys === moveTo) attachKeys = undefined
       activeModifiers.clear()
     }
   }, 'dsh-mobile-drawer：手机按键条')
 
-  ctx.slots.inject('conversation.input.dock', () =>
+  ctx.slots.inject('conversation.input.right', () =>
     ctx.slots.register(
       {
-        name: 'conversation.input.dock',
-        id: 'dsh-mobile-drawer-keys',
+        name: 'conversation.input.right',
+        id: 'dsh-mobile-keys',
         order: 100,
       },
       ActionsBridge,

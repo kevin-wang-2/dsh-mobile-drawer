@@ -55,7 +55,8 @@
   "scripts": {
     "prepare": "tsdown",
     "build": "tsdown",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh": "^0.2.0-rc.2",
@@ -69,6 +70,7 @@
     "@deepseek-ai/dsh-client-ui-slots": "0.2.0-rc.2",
     "@types/node": "^22.20.1",
     "@types/react": "~18.3.1",
+    "playwright": "1.62.1",
     "tsdown": "^0.23.0",
     "typescript": "^5.9.3"
   }
